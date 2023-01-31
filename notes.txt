@@ -1,0 +1,10 @@
+screen is 16 32x32 tiles wide and 14 tall. That means we can have levels that
+are 4 screens wide and a little over 2 tall without having to do any spicy
+stuff. Frankly, for the style of game I am trying to make, I think that is
+perfectly acceptable.
+
+ok so to write to oam we set the table select bit in $2103 because there is the
+big table where every sprite has 2 bytes, and the small table where each sprite
+has 2 bits. Before that we just set the write address at $2102. As far as I can
+tell writing to the large table obviously requires 2 successive writes, but I
+think you can just do one write to the small table thankfully.

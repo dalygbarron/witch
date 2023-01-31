@@ -1,0 +1,164 @@
+.INCLUDE "src/Header.inc"
+.INCLUDE "src/SnesInit.asm"
+
+; Hardware Registers.
+.DEFINE SCREEN_DISPLAY_REGISTER $2100
+.DEFINE OAM $2101
+.DEFINE OAM_ADDR $2102
+.DEFINE OAM_WRITE $2104
+.DEFINE BG_MODE $2105
+.DEFINE BG_1_ADDR $2107
+.DEFINE BG_12_TILE $210b
+.DEFINE BG_1_H_SCROLL $210d
+.DEFINE VRAM_INCREMENT $2115
+.DEFINE VRAM_ADDR $2116
+.DEFINE VRAM_WRITE $2118
+.DEFINE CGRAM_ADDR $2121
+.DEFINE CGRAM_DATA $2122
+.DEFINE MAIN_SCREEN_PARAM $212c
+.DEFINE NMI_AND_STUFF $4200
+.DEFINE DMA_ENABLE $420b
+.DEFINE DMA_PARAM $4300
+.DEFINE DMA_B_ADDR $4301
+.DEFINE DMA_A_ADDR $4302
+.DEFINE DMA_A_BANK $4304
+.DEFINE DMA_N $4305
+
+.DEFINE MAP_A $4000
+
+Tiles: .INCBIN "bin/tiles.bin" FSIZE TILES_SIZE
+Palette: .INCBIN "bin/palette.bin" FSIZE PALETTE_SIZE
+
+; Makes A 16 bit.
+.MACRO A16
+    rep #$20
+.ENDM
+
+; Makes A 8 bit.
+.MACRO A8
+    sep #$20
+.ENDM
+
+; Makes X 16 bit.
+.MACRO Index16
+    rep #$10
+.ENDM
+
+; Makes X 8 bit.
+.MACRO Index8
+    sep #$10
+.ENDM
+
+; Uses the A register to write a value to somewhere. The value has gotta be a normal value not a memory address or
+; something because I have to hard code that fact for some reason.
+.MACRO PutA ARGS VALUE, ADDR
+    lda #VALUE
+    sta ADDR
+.ENDM
+
+; Uses the Y register to write a value somewhere. The value has gotta be normal.
+.MACRO PutY ARGS VALUE, ADDR
+    ldy #VALUE
+    sty ADDR
+.ENDM
+
+; Transfers data with DMA to somewhere.
+; A8  X, Y16 X
+; LABEL is the label at which you can find the data.
+; OFFSET is the low byte of where to write (high byte being $21).
+; SIZE is the amount of data to transfer. Keep below 256.
+; PARAM is the value to set DMA_PARAM to.
+.MACRO Transfer ARGS LABEL, OFFSET, SIZE, PARAM
+    PutY SIZE, DMA_N                ; Set amount of data to transfer.
+    PutY LABEL, DMA_A_ADDR          ; Set DMA read memory address.
+    PutA :LABEL, DMA_A_BANK         ; Set DMA read memory bank.
+    PutA PARAM, DMA_PARAM           ; Set DMA transfer params.
+    PutA OFFSET, DMA_B_ADDR         ; Set DMA write address to byte in $21 range.
+    PutA 1, DMA_ENABLE              ; Enable DMA channel 1.
+.ENDM
+
+; Loads a palette into cgram.
+; A8 X, Y16 X
+; LABEL is the label where the palette data is.
+; WRITE_ADDRESS is where to write the data in cgram.
+; SIZE is the number of bytes of data we are working with. It has to be less than 256 or it will not work.
+.MACRO SetPalette ARGS LABEL, WRITE_ADDR, SIZE
+    _SetPalette
+    PutA WRITE_ADDR, CGRAM_ADDR     ; Set CGRAM write location.
+    Transfer LABEL, $22, SIZE, 0    ; Start the transfer.
+.ENDM
+
+; macro that writes a bunch of tile data into vram.
+; A8 X, Y16 X
+; Changes the values in the A and Y registers.
+.MACRO LoadVRAM ARGS LABEL, WRITE_ADDR, SIZE
+    _LoadVRAM
+    PutA $80, VRAM_INCREMENT        ; Make vram write increment 128 bytes.
+    PutY WRITE_ADDR, VRAM_ADDR      ; Set the vram write location.
+    Transfer LABEL, $18, SIZE, 1    ; Start the transfer.
+.ENDM
+
+; Sets up the map with some crappy test data.
+; A8 X, Y16 X
+.MACRO ConfigureMap
+    _ConfigureMap
+    PutA %11110001, BG_MODE
+    PutA (((MAP_A >> 9 & 0xfc) | %01) & $ff), BG_1_ADDR
+    PutA %00000000, BG_12_TILE
+    PutA 0, VRAM_INCREMENT
+    PutY MAP_A >> 1, VRAM_ADDR
+    .REPEAT (64 * 64) INDEX COUNT
+        PutY ((COUNT # 5) << 1 & %1110), VRAM_WRITE
+    .ENDR
+.ENDM
+
+; Sets up a crappy test sprite.
+; A8 X, Y16 X
+.MACRO ConfigureSprite
+    _ConfigureSprite
+    PutA %10001, MAIN_SCREEN_PARAM
+    PutA 0, OAM
+    PutA 95, OAM_WRITE
+    PutA 95, OAM_WRITE
+    PutA 0, OAM_WRITE
+    PutA %110000, OAM_WRITE
+    PutA 1, OAM_ADDR + 1
+    PutA %00000010, OAM_WRITE
+.ENDM
+
+; Called on Vblank. Right now it screws the A register but of course if this code was meant to be useful it would not
+; do that.
+VBlank:
+    PutA 0, CGRAM_ADDR  ; Write at start of cgram.
+    A16                 ; Sets A to X and uses first byte as colour low byte.
+    txa
+    A8
+    sta CGRAM_DATA
+    xba                 ; Swap bytes of A to write colour high byte.
+    sta CGRAM_DATA
+    xba
+    sta BG_1_H_SCROLL
+    xba
+    sta BG_1_H_SCROLL
+    rti
+
+.bank 0
+.section "MainCode"
+
+; Called when the program starts. Can do whatever the hell it wants with the registers of course.
+Start:
+    SnesInit                               ; Initialize the SNES.
+    A8                                     ; Set A to 8 bit and XY to 16.
+    Index16
+    SetPalette Palette, 0, PALETTE_SIZE
+    LoadVRAM Tiles, 0, TILES_SIZE
+    ConfigureMap
+    ConfigureSprite
+    PutA $0f, SCREEN_DISPLAY_REGISTER      ; Turn on screen.
+    PutA $80, NMI_AND_STUFF                ; turn on nmi.
+    ldx #0                                 ; Init X to 0.
+    - inx
+    wai                                    ; Then loop eternally.
+    jmp -
+
+.ends
