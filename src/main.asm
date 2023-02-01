@@ -1,5 +1,6 @@
-.INCLUDE "src/Header.inc"
+.INCLUDE "src/header.inc"
 .INCLUDE "src/SnesInit.asm"
+.INCLUDE "src/struct.inc"
 
 ; Hardware Registers.
 .DEFINE SCREEN_DISPLAY_REGISTER $2100
@@ -10,6 +11,7 @@
 .DEFINE BG_1_ADDR $2107
 .DEFINE BG_12_TILE $210b
 .DEFINE BG_1_H_SCROLL $210d
+.DEFINE BG_1_V_SCROLL $210e
 .DEFINE VRAM_INCREMENT $2115
 .DEFINE VRAM_ADDR $2116
 .DEFINE VRAM_WRITE $2118
@@ -24,10 +26,20 @@
 .DEFINE DMA_A_BANK $4304
 .DEFINE DMA_N $4305
 
+; Vram Locations
 .DEFINE MAP_A $4000
 
+; Binary includes
 Tiles: .INCBIN "bin/tiles.bin" FSIZE TILES_SIZE
 Palette: .INCBIN "bin/palette.bin" FSIZE PALETTE_SIZE
+
+; Data Registers.
+Sin: .DBSIN 0, 15, 22.5, 64, 0
+Clock: .DW 0
+
+.RAMSECTION "sprites" BANK 0
+    Sprites INSTANCEOF sprite 128
+.ENDS
 
 ; Makes A 16 bit.
 .MACRO A16
@@ -53,7 +65,7 @@ Palette: .INCBIN "bin/palette.bin" FSIZE PALETTE_SIZE
 ; something because I have to hard code that fact for some reason.
 .MACRO PutA ARGS VALUE, ADDR
     lda #VALUE
-    sta ADDR
+    sta ADDR.w
 .ENDM
 
 ; Uses the Y register to write a value somewhere. The value has gotta be normal.
@@ -62,11 +74,17 @@ Palette: .INCBIN "bin/palette.bin" FSIZE PALETTE_SIZE
     sty ADDR
 .ENDM
 
+; Uses the X register to write a value somewhere. The value has gotta be normal.
+.MACRO PutX ARGS VALUE, ADDR
+    ldx #VALUE
+    stx ADDR
+.ENDM
+
 ; Transfers data with DMA to somewhere.
 ; A8  X, Y16 X
 ; LABEL is the label at which you can find the data.
 ; OFFSET is the low byte of where to write (high byte being $21).
-; SIZE is the amount of data to transfer. Keep below 256.
+; SIZE is the amount of data to transfer.
 ; PARAM is the value to set DMA_PARAM to.
 .MACRO Transfer ARGS LABEL, OFFSET, SIZE, PARAM
     PutY SIZE, DMA_N                ; Set amount of data to transfer.
@@ -77,20 +95,19 @@ Palette: .INCBIN "bin/palette.bin" FSIZE PALETTE_SIZE
     PutA 1, DMA_ENABLE              ; Enable DMA channel 1.
 .ENDM
 
-; Loads a palette into cgram.
+; Loads a palette into cgram using DMA.
 ; A8 X, Y16 X
 ; LABEL is the label where the palette data is.
 ; WRITE_ADDRESS is where to write the data in cgram.
-; SIZE is the number of bytes of data we are working with. It has to be less than 256 or it will not work.
+; SIZE is the number of bytes of data we are working with.
 .MACRO SetPalette ARGS LABEL, WRITE_ADDR, SIZE
     _SetPalette
     PutA WRITE_ADDR, CGRAM_ADDR     ; Set CGRAM write location.
     Transfer LABEL, $22, SIZE, 0    ; Start the transfer.
 .ENDM
 
-; macro that writes a bunch of tile data into vram.
+; macro that writes a bunch of tile data into vram using DMA.
 ; A8 X, Y16 X
-; Changes the values in the A and Y registers.
 .MACRO LoadVRAM ARGS LABEL, WRITE_ADDR, SIZE
     _LoadVRAM
     PutA $80, VRAM_INCREMENT        ; Make vram write increment 128 bytes.
@@ -99,47 +116,54 @@ Palette: .INCBIN "bin/palette.bin" FSIZE PALETTE_SIZE
 .ENDM
 
 ; Sets up the map with some crappy test data.
-; A8 X, Y16 X
+; A8 X, X16 X
 .MACRO ConfigureMap
     _ConfigureMap
     PutA %11110001, BG_MODE
     PutA (((MAP_A >> 9 & 0xfc) | %01) & $ff), BG_1_ADDR
     PutA %00000000, BG_12_TILE
+    PutA 0 BG_1_H_SCROLL
+    PutA 0 BG_1_V_SCROLL
     PutA 0, VRAM_INCREMENT
-    PutY MAP_A >> 1, VRAM_ADDR
-    .REPEAT (64 * 64) INDEX COUNT
-        PutY ((COUNT # 5) << 1 & %1110), VRAM_WRITE
-    .ENDR
+    PutX MAP_A >> 1, VRAM_ADDR
+    A16
+    ldx #0
+    - txa
+    and #$000f
+    sta VRAM_WRITE
+    inx
+    cpx #(64 * 32)
+    bne -
+    A8
 .ENDM
 
 ; Sets up a crappy test sprite.
-; A8 X, Y16 X
+; A8 X, X16 X
 .MACRO ConfigureSprite
     _ConfigureSprite
-    PutA %10001, MAIN_SCREEN_PARAM
-    PutA 0, OAM
-    PutA 95, OAM_WRITE
-    PutA 95, OAM_WRITE
-    PutA 0, OAM_WRITE
-    PutA %110000, OAM_WRITE
-    PutA 1, OAM_ADDR + 1
-    PutA %00000010, OAM_WRITE
+    ldx #0
+    lda #0
+    - sta Sprites.w, X
+    inx
+    cpx _sizeof_Sprites
+    bne -
+    PutA %10001, MAIN_SCREEN_PARAM      ; Turn on sprites and bg 1.
+    PutA 100, Sprites.1.x
+    PutA 100, Sprites.1.y
+    PutA 0, Sprites.1.tile
+    PutA %110000, Sprites.1.param
+    PutY $100, OAM_ADDR                 ; write to address 0 high table.
+    PutA %00000010, OAM_WRITE           ; give sprite 1 big size.
 .ENDM
 
 ; Called on Vblank. Right now it screws the A register but of course if this code was meant to be useful it would not
 ; do that.
 VBlank:
-    PutA 0, CGRAM_ADDR  ; Write at start of cgram.
-    A16                 ; Sets A to X and uses first byte as colour low byte.
-    txa
-    A8
-    sta CGRAM_DATA
-    xba                 ; Swap bytes of A to write colour high byte.
-    sta CGRAM_DATA
-    xba
-    sta BG_1_H_SCROLL
-    xba
-    sta BG_1_H_SCROLL
+    php                 ; Save register config.
+    Index16
+    PutY 0, OAM_ADDR
+    Transfer Sprites, $04, _sizeof_Sprites, 0
+    plp                 ; restore register config.
     rti
 
 .bank 0
@@ -147,18 +171,21 @@ VBlank:
 
 ; Called when the program starts. Can do whatever the hell it wants with the registers of course.
 Start:
-    SnesInit                               ; Initialize the SNES.
-    A8                                     ; Set A to 8 bit and XY to 16.
+    SnesInit                                ; Initialize the SNES.
+    A8                                      ; Set A to 8 bit and XY to 16.
     Index16
     SetPalette Palette, 0, PALETTE_SIZE
     LoadVRAM Tiles, 0, TILES_SIZE
     ConfigureMap
     ConfigureSprite
-    PutA $0f, SCREEN_DISPLAY_REGISTER      ; Turn on screen.
-    PutA $80, NMI_AND_STUFF                ; turn on nmi.
-    ldx #0                                 ; Init X to 0.
-    - inx
-    wai                                    ; Then loop eternally.
+    PutA $0f, SCREEN_DISPLAY_REGISTER       ; Turn on screen.
+    PutA $80, NMI_AND_STUFF                 ; turn on nmi.
+    cli                                     ; Enable Interrupts. 
+    ldx #0                                  ; Init X to 0.
+    - inc Clock.w
+    lda <Clock
+    sta Sprites.1.x.w
+    wai                                     ; Then loop eternally.
     jmp -
 
 .ends

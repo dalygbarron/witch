@@ -8,3 +8,7 @@ big table where every sprite has 2 bytes, and the small table where each sprite
 has 2 bits. Before that we just set the write address at $2102. As far as I can
 tell writing to the large table obviously requires 2 successive writes, but I
 think you can just do one write to the small table thankfully.
+
+Ok I think I have an issue where the sprite buffer is being put somewhere that
+overlaps with other stuff and is maybe in the ROM I dunno. Anyway I need to fix
+that.
