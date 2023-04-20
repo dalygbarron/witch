@@ -4,6 +4,7 @@
   SLOTSIZE $8000                    ; The slot is $8000 bytes in size. More details on slots later.
   DEFAULTSLOT 0
   SLOT 0 $8000                      ; Defines Slot 0's starting address.
+  SLOT 1 $0
 .ENDME
  
 .ROMBANKSIZE $8000                  ; Every ROM bank is 32 KBytes in size

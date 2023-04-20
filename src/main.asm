@@ -1,6 +1,8 @@
 .INCLUDE "src/header.inc"
 .INCLUDE "src/SnesInit.asm"
 .INCLUDE "src/struct.inc"
+.INCLUDE "src/sneslib.asm"
+.INCLUDE "src/sounds.asm"
 
 ; Hardware Registers.
 .DEFINE SCREEN_DISPLAY_REGISTER $2100
@@ -31,14 +33,15 @@
 
 ; Binary includes
 Tiles: .INCBIN "bin/tiles.bin" FSIZE TILES_SIZE
-Palette: .INCBIN "bin/palette.bin" FSIZE PALETTE_SIZE
+Palette: .INCBIN "bin/tiles.dat" FSIZE PALETTE_SIZE
 
 ; Data Registers.
-Sin: .DBSIN 0, 15, 22.5, 64, 0
-Clock: .DW 0
+Sin: .DBSIN 0, 31, 11, 64, 0
 
-.RAMSECTION "sprites" BANK 0
+.RAMSECTION "variables" BANK 0 SLOT 1
     Sprites INSTANCEOF sprite 128
+    FirstDeadSprite DW
+    Clock DW
 .ENDS
 
 ; Makes A 16 bit.
@@ -142,10 +145,9 @@ Clock: .DW 0
 .MACRO ConfigureSprite
     _ConfigureSprite
     ldx #0
-    lda #0
-    - sta Sprites.w, X
+    - stz Sprites.w, X
     inx
-    cpx _sizeof_Sprites
+    cpx #_sizeof_Sprites
     bne -
     PutA %10001, MAIN_SCREEN_PARAM      ; Turn on sprites and bg 1.
     PutA 100, Sprites.1.x
@@ -156,14 +158,28 @@ Clock: .DW 0
     PutA %00000010, OAM_WRITE           ; give sprite 1 big size.
 .ENDM
 
+; Takes the low byte from A and turns it into sin(A) where you can imagine that
+; A is divided by 256 and then multiplied by 360. The return value stays in A
+; and A is set to 8 bit.
+.MACRO GetSin
+    A16
+    and #$ff
+    lsr
+    lsr
+    lsr
+    A8
+    tax
+    lda Sin.w, X
+.ENDM
+
 ; Called on Vblank. Right now it screws the A register but of course if this code was meant to be useful it would not
 ; do that.
 VBlank:
-    php                 ; Save register config.
+    php                                         ; Save register config.
     Index16
     PutY 0, OAM_ADDR
     Transfer Sprites, $04, _sizeof_Sprites, 0
-    plp                 ; restore register config.
+    plp                                         ; restore register config.
     rti
 
 .bank 0
@@ -182,9 +198,16 @@ Start:
     PutA $80, NMI_AND_STUFF                 ; turn on nmi.
     cli                                     ; Enable Interrupts. 
     ldx #0                                  ; Init X to 0.
-    - inc Clock.w
-    lda <Clock
-    sta Sprites.1.x.w
+    -
+    A16
+    inc Clock.w
+    lda Clock.w
+    A8
+    GetSin
+    bit #%10000000
+    beq +
+    lda #0
+    + sta Sprites.1.x.w
     wai                                     ; Then loop eternally.
     jmp -
 
