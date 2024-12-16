@@ -1,7 +1,6 @@
-.INCLUDE "src/header.inc"
+.INCLUDE "src/Header.inc"
 .INCLUDE "src/SnesInit.asm"
 .INCLUDE "src/struct.inc"
-.INCLUDE "src/sneslib.asm"
 .INCLUDE "src/sounds.asm"
 
 ; Hardware Registers.
@@ -36,12 +35,14 @@ Tiles: .INCBIN "bin/tiles.bin" FSIZE TILES_SIZE
 Palette: .INCBIN "bin/tiles.dat" FSIZE PALETTE_SIZE
 
 ; Data Registers.
-Sin: .DBSIN 0, 31, 11, 64, 0
+Sin: .DBSIN 0, 63, 5.625, 128, 0
 
 .RAMSECTION "variables" BANK 0 SLOT 1
-    Sprites INSTANCEOF sprite 128
-    FirstDeadSprite DW
-    Clock DW
+    sprites INSTANCEOF Sprite 128
+    firstDeadSprite DW
+    clock DW
+    ballPos INSTANCEOF Vector
+    ballVel INSTANCEOF Vector
 .ENDS
 
 ; Makes A 16 bit.
@@ -54,18 +55,19 @@ Sin: .DBSIN 0, 31, 11, 64, 0
     sep #$20
 .ENDM
 
-; Makes X 16 bit.
+; Makes X,Y 16 bit.
 .MACRO Index16
     rep #$10
 .ENDM
 
-; Makes X 8 bit.
+; Makes X,Y 8 bit.
 .MACRO Index8
     sep #$10
 .ENDM
 
 ; Uses the A register to write a value to somewhere. The value has gotta be a normal value not a memory address or
 ; something because I have to hard code that fact for some reason.
+; TODO: if I use a 1 byte value but the register is in 2 byte mode, does it work right? what should it do?
 .MACRO PutA ARGS VALUE, ADDR
     lda #VALUE
     sta ADDR.w
@@ -104,7 +106,6 @@ Sin: .DBSIN 0, 31, 11, 64, 0
 ; WRITE_ADDRESS is where to write the data in cgram.
 ; SIZE is the number of bytes of data we are working with.
 .MACRO SetPalette ARGS LABEL, WRITE_ADDR, SIZE
-    _SetPalette
     PutA WRITE_ADDR, CGRAM_ADDR     ; Set CGRAM write location.
     Transfer LABEL, $22, SIZE, 0    ; Start the transfer.
 .ENDM
@@ -112,7 +113,6 @@ Sin: .DBSIN 0, 31, 11, 64, 0
 ; macro that writes a bunch of tile data into vram using DMA.
 ; A8 X, Y16 X
 .MACRO LoadVRAM ARGS LABEL, WRITE_ADDR, SIZE
-    _LoadVRAM
     PutA $80, VRAM_INCREMENT        ; Make vram write increment 128 bytes.
     PutY WRITE_ADDR, VRAM_ADDR      ; Set the vram write location.
     Transfer LABEL, $18, SIZE, 1    ; Start the transfer.
@@ -121,7 +121,6 @@ Sin: .DBSIN 0, 31, 11, 64, 0
 ; Sets up the map with some crappy test data.
 ; A8 X, X16 X
 .MACRO ConfigureMap
-    _ConfigureMap
     PutA %11110001, BG_MODE
     PutA (((MAP_A >> 9 & 0xfc) | %01) & $ff), BG_1_ADDR
     PutA %00000000, BG_12_TILE
@@ -132,8 +131,9 @@ Sin: .DBSIN 0, 31, 11, 64, 0
     A16
     ldx #0
     - txa
-    and #$000f
+    and #$f
     sta VRAM_WRITE
+    inx
     inx
     cpx #(64 * 32)
     bne -
@@ -143,43 +143,46 @@ Sin: .DBSIN 0, 31, 11, 64, 0
 ; Sets up a crappy test sprite.
 ; A8 X, X16 X
 .MACRO ConfigureSprite
-    _ConfigureSprite
     ldx #0
-    - stz Sprites.w, X
+    - stz sprites, X
     inx
-    cpx #_sizeof_Sprites
+    cpx #_sizeof_sprites
     bne -
-    PutA %10001, MAIN_SCREEN_PARAM      ; Turn on sprites and bg 1.
-    PutA 100, Sprites.1.x
-    PutA 100, Sprites.1.y
-    PutA 0, Sprites.1.tile
-    PutA %110000, Sprites.1.param
-    PutY $100, OAM_ADDR                 ; write to address 0 high table.
-    PutA %00000010, OAM_WRITE           ; give sprite 1 big size.
+    PutA #%10001, MAIN_SCREEN_PARAM      ; Turn on sprites and bg 1.
+    PutA #100, sprites.1.pos.y.b
+    PutA #0, sprites.1.tile.b
+    PutA #%00110000, sprites.1.param.b
+    PutY #$100, OAM_ADDR                 ; write to address 0 high table.
+    PutA #%00000010, OAM_WRITE           ; give sprite 1 big size.
 .ENDM
 
 ; Takes the low byte from A and turns it into sin(A) where you can imagine that
-; A is divided by 256 and then multiplied by 360. The return value stays in A
-; and A is set to 8 bit.
+; A is divided by 256 and then multiplied by 360. Also the resulting value is
+; between -128 and 128 rather than between -1 and 1. The return value stays in A
+; and A, X, and Y are all set to 8 bit mode.
 .MACRO GetSin
-    A16
-    and #$ff
-    lsr
-    lsr
-    lsr
+    Index8
     A8
+    and #$ff
+    lsr           ; we shift right twice because there are only 64 values.
+    lsr
     tax
     lda Sin.w, X
 .ENDM
 
-; Called on Vblank. Right now it screws the A register but of course if this code was meant to be useful it would not
-; do that.
+; Called on Vblank. Right now it transfers all the sprites into the sprite
+; memory thing. This is kinda necessary because we need to upload dead sprites
+; too so that it knows not to render them. Anyway as far as I can tell
+; performance is fine and we are already transferring all these sprites so that
+; is cool as far as I am concerned.
 VBlank:
+    phy
     php                                         ; Save register config.
     Index16
     PutY 0, OAM_ADDR
-    Transfer Sprites, $04, _sizeof_Sprites, 0
+    Transfer sprites, $04, _sizeof_sprites, 0
     plp                                         ; restore register config.
+    ply
     rti
 
 .bank 0
@@ -200,14 +203,10 @@ Start:
     ldx #0                                  ; Init X to 0.
     -
     A16
-    inc Clock.w
-    lda Clock.w
-    A8
+    inc clock.w
+    lda clock.w
     GetSin
-    bit #%10000000
-    beq +
-    lda #0
-    + sta Sprites.1.x.w
+    sta sprites.1.pos.x.b
     wai                                     ; Then loop eternally.
     jmp -
 
